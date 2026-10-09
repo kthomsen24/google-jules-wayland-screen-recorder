@@ -36,6 +36,7 @@ class RecorderConfig:
         framerate: int = 30,
         geometry: Optional[str] = None,  # e.g. "0,0 1920x1080"
         codec: Optional[str] = None,
+        force_ffmpeg: bool = False,
     ):
         self.output_file = output_file
         self.format = format
@@ -45,6 +46,7 @@ class RecorderConfig:
         self.framerate = framerate
         self.geometry = geometry
         self.codec = codec
+        self.force_ffmpeg = force_ffmpeg
 
     def validate(self) -> Tuple[bool, Optional[str]]:
         if not self.output_file:
@@ -67,6 +69,7 @@ class ScreenRecorderEngine:
         self.start_time: Optional[float] = None
         self.stop_time: Optional[float] = None
         self._last_error: Optional[str] = None
+        self._active_backend_cmd: Optional[str] = None
 
     @property
     def is_recording(self) -> bool:
@@ -87,17 +90,20 @@ class ScreenRecorderEngine:
         elif os.environ.get("DISPLAY"):
             return DisplayPlatform.X11
         else:
-            # Default to Wayland if wf-recorder exists, otherwise X11
             if shutil.which("wf-recorder"):
                 return DisplayPlatform.WAYLAND
             return DisplayPlatform.X11
 
-    def build_command(self) -> List[str]:
+    def build_command(self, force_ffmpeg_override: bool = False) -> List[str]:
         platform = self.detect_platform()
         cmd: List[str] = []
 
-        # Determine if we can use wf-recorder for Wayland
-        use_wf_recorder = (platform == DisplayPlatform.WAYLAND) and (shutil.which("wf-recorder") is not None)
+        use_wf_recorder = (
+            (platform == DisplayPlatform.WAYLAND)
+            and (shutil.which("wf-recorder") is not None)
+            and not self.config.force_ffmpeg
+            and not force_ffmpeg_override
+        )
 
         if use_wf_recorder:
             cmd.append("wf-recorder")
@@ -110,16 +116,15 @@ class ScreenRecorderEngine:
             if self.config.codec:
                 cmd.extend(["-c", self.config.codec])
 
-            # Audio setup for wf-recorder
             if self.config.audio_backend != AudioBackend.NONE:
                 if self.config.audio_device_id and self.config.audio_device_id != "default":
                     cmd.append(f"--audio={self.config.audio_device_id}")
                 else:
                     cmd.append("-a")
         else:
-            # FFmpeg fallback path (for X11, XWayland, or Wayland KMS/Pipewire fallback)
+            # FFmpeg path
             cmd.append("ffmpeg")
-            cmd.extend(["-y"])  # Overwrite output file if exists
+            cmd.extend(["-y"])
 
             # Video input selection
             if platform in (DisplayPlatform.X11, DisplayPlatform.XWAYLAND):
@@ -127,7 +132,6 @@ class ScreenRecorderEngine:
                 cmd.extend(["-f", "x11grab"])
                 cmd.extend(["-r", str(self.config.framerate)])
                 if self.config.geometry:
-                    # Geometry format x,y WxH -> WxH -i :0.0+x,y
                     try:
                         coords, size = self.config.geometry.split()
                         cmd.extend(["-s", size])
@@ -137,10 +141,18 @@ class ScreenRecorderEngine:
                 else:
                     cmd.extend(["-i", display_str])
             elif platform == DisplayPlatform.WAYLAND:
-                # Fallback for Wayland without wf-recorder using KMS/DRM or x11grab via Xwayland
                 display_str = os.environ.get("DISPLAY", ":0.0")
                 if os.environ.get("DISPLAY"):
-                    cmd.extend(["-f", "x11grab", "-r", str(self.config.framerate), "-i", display_str])
+                    cmd.extend(["-f", "x11grab", "-r", str(self.config.framerate)])
+                    if self.config.geometry:
+                        try:
+                            coords, size = self.config.geometry.split()
+                            cmd.extend(["-s", size])
+                            cmd.extend(["-i", f"{display_str}+{coords}"])
+                        except Exception:
+                            cmd.extend(["-i", display_str])
+                    else:
+                        cmd.extend(["-i", display_str])
                 elif os.path.exists("/dev/dri/card0"):
                     cmd.extend(["-f", "kmsgrab", "-r", str(self.config.framerate), "-i", "-"])
                 else:
@@ -170,26 +182,13 @@ class ScreenRecorderEngine:
 
         return cmd
 
-    def start(self) -> Tuple[bool, Optional[str]]:
-        if self.is_recording:
-            return False, "Recording is already in progress."
-
-        valid, err = self.config.validate()
-        if not valid:
-            return False, f"Invalid configuration: {err}"
-
-        cmd = self.build_command()
-
-        # Set environment flags based on target platform for GDK/Qt failsafe
+    def _spawn_process(self, cmd: List[str]) -> Tuple[bool, Optional[str]]:
         env = os.environ.copy()
         platform = self.detect_platform()
         if platform == DisplayPlatform.WAYLAND:
             env["GDK_BACKEND"] = "wayland,x11"
             env["QT_QPA_PLATFORM"] = "wayland;xcb"
-        elif platform == DisplayPlatform.X11:
-            env["GDK_BACKEND"] = "x11"
-            env["QT_QPA_PLATFORM"] = "xcb"
-        elif platform == DisplayPlatform.XWAYLAND:
+        elif platform in (DisplayPlatform.X11, DisplayPlatform.XWAYLAND):
             env["GDK_BACKEND"] = "x11"
             env["QT_QPA_PLATFORM"] = "xcb"
 
@@ -203,20 +202,51 @@ class ScreenRecorderEngine:
             )
             self.start_time = time.time()
             self._last_error = None
+            self._active_backend_cmd = cmd[0]
 
-            # Short sleep to check if command immediately failed
             time.sleep(0.3)
             if self.process.poll() is not None:
                 _, stderr = self.process.communicate()
                 self._last_error = stderr
                 self.process = None
-                return False, f"Recorder failed to start: {stderr.strip()}"
+                return False, stderr.strip() if stderr else "Process exited immediately."
 
             return True, None
         except Exception as e:
             self.process = None
             self._last_error = str(e)
-            return False, f"Failed to execute recorder command ({cmd[0]}): {e}"
+            return False, str(e)
+
+    def start(self) -> Tuple[bool, Optional[str]]:
+        if self.is_recording:
+            return False, "Recording is already in progress."
+
+        valid, err = self.config.validate()
+        if not valid:
+            return False, f"Invalid configuration: {err}"
+
+        # First attempt with primary built command
+        cmd = self.build_command()
+        success, err_msg = self._spawn_process(cmd)
+
+        if not success:
+            # Check if failure was due to wf-recorder screencopy unsupported protocol on non-wlroots Wayland
+            is_screencopy_error = err_msg and ("wlr-screencopy-unstable-v1" in err_msg or "screencopy" in err_msg)
+            if cmd[0] == "wf-recorder" and (is_screencopy_error or "failed" in err_msg.lower()):
+                # Fallback to FFmpeg (XWayland / KMS)
+                fallback_cmd = self.build_command(force_ffmpeg_override=True)
+                fallback_success, fallback_err = self._spawn_process(fallback_cmd)
+                if fallback_success:
+                    return True, None
+                else:
+                    return False, (
+                        f"wf-recorder failed ({err_msg}). "
+                        f"Fallback FFmpeg recording also failed: {fallback_err}"
+                    )
+
+            return False, f"Recorder failed to start: {err_msg}"
+
+        return True, None
 
     def stop(self) -> Tuple[bool, Optional[str]]:
         if not self.is_recording or self.process is None:
@@ -224,7 +254,6 @@ class ScreenRecorderEngine:
 
         try:
             self.stop_time = time.time()
-            # Send SIGINT to gracefully terminate recorder and finalize container
             self.process.send_signal(signal.SIGINT)
 
             try:
@@ -256,6 +285,7 @@ class ScreenRecorderEngine:
             "output_file": self.config.output_file,
             "file_size_bytes": file_size,
             "platform": self.detect_platform().value,
+            "backend_used": self._active_backend_cmd,
             "audio_backend": self.config.audio_backend.value,
             "audio_device": self.config.audio_device_id,
             "last_error": self._last_error

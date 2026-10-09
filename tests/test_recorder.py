@@ -123,9 +123,33 @@ class TestScreenRecorderEngine(unittest.TestCase):
             self.assertIn(out_path, cmd)
 
     @patch("subprocess.Popen")
+    def test_screencopy_unsupported_fallback_to_ffmpeg(self, mock_popen):
+        # First call (wf-recorder) fails with screencopy error
+        fail_proc = MagicMock()
+        fail_proc.poll.return_value = 1
+        fail_proc.communicate.return_value = ("", "Recorder failed to start: compositor doesn't support wlr-screencopy-unstable-v1")
+
+        # Second call (ffmpeg fallback) succeeds
+        success_proc = MagicMock()
+        success_proc.poll.return_value = None
+
+        mock_popen.side_effect = [fail_proc, success_proc]
+
+        out_path = os.path.join(self.tmp_dir, "fallback.mp4")
+        cfg = RecorderConfig(output_file=out_path, platform=DisplayPlatform.WAYLAND)
+        engine = ScreenRecorderEngine(cfg)
+
+        with patch("shutil.which", return_value="/usr/bin/wf-recorder"):
+            success, err = engine.start()
+            self.assertTrue(success)
+            self.assertIsNone(err)
+            self.assertEqual(mock_popen.call_count, 2)
+            self.assertEqual(engine.get_status()["backend_used"], "ffmpeg")
+
+    @patch("subprocess.Popen")
     def test_start_and_stop_mocked(self, mock_popen):
         mock_proc = MagicMock()
-        mock_proc.poll.return_value = None  # Process is running
+        mock_proc.poll.return_value = None
         mock_proc.wait.return_value = 0
         mock_popen.return_value = mock_proc
 
@@ -164,7 +188,6 @@ class TestCLI(unittest.TestCase):
 
 class TestGUIInitialization(unittest.TestCase):
     def test_gui_instantiation(self):
-        # Requires DISPLAY / Xvfb if in headless environment
         try:
             from screen_recorder.gui import ScreenRecorderGUI
             app = ScreenRecorderGUI()
