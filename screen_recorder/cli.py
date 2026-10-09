@@ -15,7 +15,7 @@ from .engine import ScreenRecorderEngine, RecorderConfig, DisplayPlatform, Conta
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
-        description="Screen Recorder Utility (Wayland, KDE Plasma, PipeWire, X11, XWayland) with ALSA/Pulse/JACK audio."
+        description="Screen Recorder Utility (Wayland, KDE Spectacle, PipeWire, X11, XWayland) with ALSA/Pulse/JACK audio."
     )
     parser.add_argument(
         "-o", "--output",
@@ -30,9 +30,9 @@ def parse_args(args=None):
     )
     parser.add_argument(
         "-p", "--platform",
-        choices=["auto", "wayland", "pipewire", "x11", "xwayland"],
+        choices=["auto", "wayland", "spectacle", "pipewire", "x11", "xwayland"],
         default="auto",
-        help="Display platform / capture mode (auto, wayland, pipewire, x11, xwayland). Default: auto"
+        help="Display platform / capture mode (auto, wayland, spectacle, pipewire, x11, xwayland). Default: auto"
     )
     parser.add_argument(
         "-a", "--audio",
@@ -68,9 +68,14 @@ def parse_args(args=None):
         help="Duration in seconds to record semi-autonomously. If omitted, press Ctrl+C to stop."
     )
     parser.add_argument(
+        "--use-spectacle",
+        action="store_true",
+        help="Use Spectacle DBus native recorder for KDE Plasma Wayland."
+    )
+    parser.add_argument(
         "--use-pipewire",
         action="store_true",
-        help="Force PipeWire/GStreamer capture (recommended for KDE Plasma / KWin & GNOME Wayland)."
+        help="Force PipeWire/GStreamer capture."
     )
     parser.add_argument(
         "--list-audio",
@@ -94,7 +99,6 @@ def main(args=None):
                 print(f"  - ID: {d.device_id} | Name: {d.name}")
         return 0
 
-    # Determine container format
     output_path = parsed.output
     if parsed.format:
         fmt = ContainerFormat(parsed.format)
@@ -117,6 +121,7 @@ def main(args=None):
         framerate=parsed.framerate,
         geometry=parsed.geometry,
         codec=parsed.codec,
+        use_spectacle=parsed.use_spectacle,
         use_pipewire_gstreamer=parsed.use_pipewire
     )
 
