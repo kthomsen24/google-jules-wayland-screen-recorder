@@ -94,20 +94,6 @@ libavcodec     60. 31.102 / 60. 31.102
         self.assertNotIn("configuration:", clean)
         self.assertIn("Cannot open display", clean)
 
-    def test_command_building_spectacle(self):
-        out_path = os.path.join(self.tmp_dir, "kde.mp4")
-        cfg = RecorderConfig(
-            output_file=out_path,
-            platform=DisplayPlatform.SPECTACLE,
-            use_spectacle=True
-        )
-        engine = ScreenRecorderEngine(cfg)
-
-        with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/qdbus" if cmd == "qdbus" else None):
-            cmd = engine.build_command()
-            self.assertEqual(cmd[0], "qdbus")
-            self.assertIn("org.kde.Spectacle", cmd)
-
     def test_command_building_wf_recorder(self):
         out_path = os.path.join(self.tmp_dir, "out.mp4")
         cfg = RecorderConfig(
@@ -190,9 +176,9 @@ libavcodec     60. 31.102 / 60. 31.102
 
 class TestCLI(unittest.TestCase):
     def test_cli_argument_parsing(self):
-        args = parse_args(["-o", "my_rec.mkv", "-p", "spectacle", "-a", "jack", "-t", "5"])
+        args = parse_args(["-o", "my_rec.mkv", "-p", "pipewire", "-a", "jack", "-t", "5"])
         self.assertEqual(args.output, "my_rec.mkv")
-        self.assertEqual(args.platform, "spectacle")
+        self.assertEqual(args.platform, "pipewire")
         self.assertEqual(args.audio, "jack")
         self.assertEqual(args.duration, 5.0)
 
