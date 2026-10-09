@@ -1,10 +1,11 @@
 """
 Screen Recorder Engine for Wayland, X11, and XWayland with ALSA/PulseAudio/JACK support.
-Supports PipeWire/GStreamer screen capture for KDE Plasma / GNOME Wayland compositors.
+Provides robust fallback logic and error sanitization for FFmpeg, wf-recorder, and PipeWire/GStreamer.
 """
 
 from enum import Enum
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -25,6 +26,46 @@ class DisplayPlatform(str, Enum):
 class ContainerFormat(str, Enum):
     MP4 = "mp4"
     MKV = "mkv"
+
+
+def sanitize_recorder_error(raw_stderr: str) -> str:
+    """
+    Strips out verbose FFmpeg/GStreamer configuration banners and returns
+    only the meaningful error summary.
+    """
+    if not raw_stderr:
+        return "Unknown recorder error (no output produced)."
+
+    lines = raw_stderr.splitlines()
+    filtered_lines = []
+
+    skip_patterns = [
+        r"^ffmpeg version",
+        r"^\s*built with",
+        r"^\s*configuration:",
+        r"^\s*libav",
+        r"^\s*libsw",
+        r"^\s*libpostproc",
+        r"^Hyper Fast Audio and Video encoder",
+        r"^Setting pipeline to",
+        r"^PREROLLING",
+        r"^PREROLLED",
+        r"^RUNNING",
+    ]
+
+    for line in lines:
+        line_str = line.strip()
+        if not line_str:
+            continue
+        if any(re.search(pat, line_str, re.IGNORECASE) for pat in skip_patterns):
+            continue
+        filtered_lines.append(line_str)
+
+    if filtered_lines:
+        # Return last few meaningful error lines
+        return "\n".join(filtered_lines[-5:])
+
+    return lines[-1] if lines else raw_stderr.strip()
 
 
 class RecorderConfig:
@@ -110,7 +151,7 @@ class ScreenRecorderEngine:
         )
 
         use_gstreamer_pipewire = (
-            (platform == DisplayPlatform.PIPEWIRE or self.config.use_pipewire_gstreamer or force_fallback)
+            (platform == DisplayPlatform.PIPEWIRE or self.config.use_pipewire_gstreamer)
             and shutil.which("gst-launch-1.0") is not None
         )
 
@@ -132,17 +173,16 @@ class ScreenRecorderEngine:
                     cmd.append("-a")
 
         elif use_gstreamer_pipewire:
-            # PipeWire / GStreamer pipeline (native Wayland screen capture for KDE Plasma / KWin & GNOME)
+            # GStreamer PipeWire pipeline
             cmd.append("gst-launch-1.0")
-            cmd.extend(["-e"])  # Send EOS on SIGINT for clean container closing
+            cmd.extend(["-e"])
 
-            # Video source
+            # Video branch
             cmd.extend(["pipewiresrc", "do-timestamp=true", "!"])
             cmd.extend(["videoconvert", "!"])
             cmd.extend(["videorate", "!"])
             cmd.extend([f"video/x-raw,framerate={self.config.framerate}/1", "!"])
 
-            # Video encoder & muxer based on output format
             if self.config.format == ContainerFormat.MKV:
                 cmd.extend(["x264enc", "speed-preset=ultrafast", "tune=zerolatency", "!"])
                 cmd.extend(["matroskamux", "name=mux", "!"])
@@ -152,29 +192,10 @@ class ScreenRecorderEngine:
                 cmd.extend(["mp4mux", "name=mux", "!"])
                 cmd.extend(["filesink", f"location={self.config.output_file}"])
 
-            # Audio pipeline integration if requested
-            if self.config.audio_backend == AudioBackend.PULSEAUDIO:
-                device = self.config.audio_device_id or "default"
-                cmd.extend(["pulsesrc", f"device={device}", "!"])
-                cmd.extend(["audioconvert", "!"])
-                cmd.extend(["lamemp3enc", "!"])
-                cmd.extend(["mux."])
-            elif self.config.audio_backend == AudioBackend.ALSA:
-                device = self.config.audio_device_id or "default"
-                cmd.extend(["alsasrc", f"device={device}", "!"])
-                cmd.extend(["audioconvert", "!"])
-                cmd.extend(["lamemp3enc", "!"])
-                cmd.extend(["mux."])
-            elif self.config.audio_backend == AudioBackend.JACK:
-                cmd.extend(["jackaudiosrc", "!"])
-                cmd.extend(["audioconvert", "!"])
-                cmd.extend(["lamemp3enc", "!"])
-                cmd.extend(["mux."])
-
         else:
-            # Standard FFmpeg path (X11 / XWayland / KMS)
+            # Standard FFmpeg path
             cmd.append("ffmpeg")
-            cmd.extend(["-y"])
+            cmd.extend(["-hide_banner", "-loglevel", "error", "-y"])
 
             if platform in (DisplayPlatform.X11, DisplayPlatform.XWAYLAND):
                 display_str = os.environ.get("DISPLAY", ":0.0")
@@ -256,9 +277,10 @@ class ScreenRecorderEngine:
             time.sleep(0.3)
             if self.process.poll() is not None:
                 _, stderr = self.process.communicate()
-                self._last_error = stderr
+                clean_err = sanitize_recorder_error(stderr)
+                self._last_error = clean_err
                 self.process = None
-                return False, stderr.strip() if stderr else "Process exited immediately."
+                return False, clean_err
 
             return True, None
         except Exception as e:
@@ -274,24 +296,24 @@ class ScreenRecorderEngine:
         if not valid:
             return False, f"Invalid configuration: {err}"
 
-        # Build initial command
         cmd = self.build_command()
         success, err_msg = self._spawn_process(cmd)
 
         if not success:
             is_screencopy_error = err_msg and ("wlr-screencopy-unstable-v1" in err_msg or "screencopy" in err_msg)
 
-            # If wf-recorder failed due to unsupported wlr-screencopy protocol on Kubuntu/KDE Plasma/GNOME
             if cmd[0] == "wf-recorder" and (is_screencopy_error or "failed" in err_msg.lower()):
-                # Try GStreamer PipeWire pipeline first
+                # Fallback attempt 1: PipeWire if GStreamer is available
                 if shutil.which("gst-launch-1.0"):
-                    fallback_cmd = self.build_command(force_fallback=True)
-                    fallback_success, fallback_err = self._spawn_process(fallback_cmd)
-                    if fallback_success:
+                    self.config.use_pipewire_gstreamer = True
+                    pipewire_cmd = self.build_command()
+                    pw_success, pw_err = self._spawn_process(pipewire_cmd)
+                    if pw_success:
                         return True, None
 
-                # Secondary fallback: FFmpeg x11grab/KMS
+                # Fallback attempt 2: FFmpeg x11grab
                 self.config.force_ffmpeg = True
+                self.config.use_pipewire_gstreamer = False
                 ffmpeg_cmd = self.build_command()
                 ffmpeg_success, ffmpeg_err = self._spawn_process(ffmpeg_cmd)
                 if ffmpeg_success:
@@ -299,7 +321,7 @@ class ScreenRecorderEngine:
                 else:
                     return False, (
                         f"wf-recorder failed ({err_msg}). "
-                        f"Fallback recording options also failed: {ffmpeg_err}"
+                        f"Fallback options also failed: {ffmpeg_err}"
                     )
 
             return False, f"Recorder failed to start: {err_msg}"
