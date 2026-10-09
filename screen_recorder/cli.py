@@ -15,7 +15,7 @@ from .engine import ScreenRecorderEngine, RecorderConfig, DisplayPlatform, Conta
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
-        description="Screen Recorder Utility (Wayland, X11, XWayland) with ALSA/Pulse/JACK audio."
+        description="Screen Recorder Utility (Wayland, KDE Plasma, PipeWire, X11, XWayland) with ALSA/Pulse/JACK audio."
     )
     parser.add_argument(
         "-o", "--output",
@@ -30,9 +30,9 @@ def parse_args(args=None):
     )
     parser.add_argument(
         "-p", "--platform",
-        choices=["auto", "wayland", "x11", "xwayland"],
+        choices=["auto", "wayland", "pipewire", "x11", "xwayland"],
         default="auto",
-        help="Display platform / mode (auto, wayland, x11, xwayland). Default: auto"
+        help="Display platform / capture mode (auto, wayland, pipewire, x11, xwayland). Default: auto"
     )
     parser.add_argument(
         "-a", "--audio",
@@ -66,6 +66,11 @@ def parse_args(args=None):
         type=float,
         default=None,
         help="Duration in seconds to record semi-autonomously. If omitted, press Ctrl+C to stop."
+    )
+    parser.add_argument(
+        "--use-pipewire",
+        action="store_true",
+        help="Force PipeWire/GStreamer capture (recommended for KDE Plasma / KWin & GNOME Wayland)."
     )
     parser.add_argument(
         "--list-audio",
@@ -111,7 +116,8 @@ def main(args=None):
         audio_device_id=parsed.audio_device,
         framerate=parsed.framerate,
         geometry=parsed.geometry,
-        codec=parsed.codec
+        codec=parsed.codec,
+        use_pipewire_gstreamer=parsed.use_pipewire
     )
 
     engine = ScreenRecorderEngine(config)
@@ -163,6 +169,7 @@ def main(args=None):
     print(f"Saved file:   {status['output_file']}")
     print(f"Duration:     {status['duration']} seconds")
     print(f"File size:    {status['file_size_bytes']} bytes")
+    print(f"Backend used: {status['backend_used']}")
 
     return 0
 
