@@ -1,6 +1,6 @@
 """
 Screen Recorder Engine for Wayland, X11, and XWayland with ALSA/PulseAudio/JACK support.
-Supports PipeWire, wf-recorder, and FFmpeg capture options.
+Supports OBS Studio CLI recording, PipeWire portal capture, wf-recorder, and FFmpeg capture backends.
 """
 
 from enum import Enum
@@ -21,6 +21,7 @@ class DisplayPlatform(str, Enum):
     X11 = "x11"
     XWAYLAND = "xwayland"
     PIPEWIRE = "pipewire"
+    OBS = "obs"
 
 
 class ContainerFormat(str, Enum):
@@ -80,6 +81,7 @@ class RecorderConfig:
         codec: Optional[str] = None,
         force_ffmpeg: bool = False,
         use_pipewire_gstreamer: bool = False,
+        use_obs: bool = False,
     ):
         self.output_file = output_file
         self.format = format
@@ -91,6 +93,7 @@ class RecorderConfig:
         self.codec = codec
         self.force_ffmpeg = force_ffmpeg
         self.use_pipewire_gstreamer = use_pipewire_gstreamer
+        self.use_obs = use_obs
 
     def validate(self) -> Tuple[bool, Optional[str]]:
         if not self.output_file:
@@ -130,7 +133,9 @@ class ScreenRecorderEngine:
         desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
 
         if ("kde" in desktop or "gnome" in desktop) and (wayland_display or xdg_session_type == "wayland"):
-            if shutil.which("gst-launch-1.0"):
+            if shutil.which("obs"):
+                return DisplayPlatform.OBS
+            elif shutil.which("gst-launch-1.0"):
                 return DisplayPlatform.PIPEWIRE
             elif shutil.which("wf-recorder"):
                 return DisplayPlatform.WAYLAND
@@ -150,21 +155,34 @@ class ScreenRecorderEngine:
         platform = self.detect_platform()
         cmd: List[str] = []
 
+        use_obs = (
+            (platform == DisplayPlatform.OBS or self.config.use_obs)
+            and shutil.which("obs") is not None
+            and not force_fallback
+        )
+
         use_wf_recorder = (
             (platform == DisplayPlatform.WAYLAND)
             and (shutil.which("wf-recorder") is not None)
             and not self.config.force_ffmpeg
             and not self.config.use_pipewire_gstreamer
+            and not use_obs
             and not force_fallback
         )
 
         use_gstreamer_pipewire = (
-            (platform == DisplayPlatform.PIPEWIRE or self.config.use_pipewire_gstreamer or force_fallback)
+            (platform == DisplayPlatform.PIPEWIRE or self.config.use_pipewire_gstreamer)
             and shutil.which("gst-launch-1.0") is not None
             and not use_wf_recorder
+            and not use_obs
         )
 
-        if use_wf_recorder:
+        if use_obs:
+            # OBS Studio CLI recording mode
+            cmd.append("obs")
+            cmd.extend(["--startrecording", "--minimize-to-tray"])
+
+        elif use_wf_recorder:
             cmd.append("wf-recorder")
             cmd.extend(["-f", self.config.output_file])
             cmd.extend(["-r", str(self.config.framerate)])
@@ -280,7 +298,7 @@ class ScreenRecorderEngine:
     def _spawn_process(self, cmd: List[str]) -> Tuple[bool, Optional[str]]:
         env = os.environ.copy()
         platform = self.detect_platform()
-        if platform == DisplayPlatform.WAYLAND:
+        if platform in (DisplayPlatform.WAYLAND, DisplayPlatform.OBS):
             env["GDK_BACKEND"] = "wayland,x11"
             env["QT_QPA_PLATFORM"] = "wayland;xcb"
         elif platform in (DisplayPlatform.X11, DisplayPlatform.XWAYLAND):
@@ -330,6 +348,7 @@ class ScreenRecorderEngine:
         if not success:
             if shutil.which("gst-launch-1.0"):
                 self.config.use_pipewire_gstreamer = True
+                self.config.use_obs = False
                 pipewire_cmd = self.build_command()
                 pw_success, pw_err = self._spawn_process(pipewire_cmd)
                 if pw_success:
@@ -337,6 +356,7 @@ class ScreenRecorderEngine:
 
             self.config.force_ffmpeg = True
             self.config.use_pipewire_gstreamer = False
+            self.config.use_obs = False
             ffmpeg_cmd = self.build_command()
             ffmpeg_success, ffmpeg_err = self._spawn_process(ffmpeg_cmd)
             if ffmpeg_success:

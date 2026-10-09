@@ -1,6 +1,6 @@
 """
 GUI Interface for Screen Recorder Utility using Tkinter.
-Runs in its own window with manual controls for recording, stopping, audio source selection, and platform/Spectacle/PipeWire flags.
+Runs in its own window with manual controls for recording, stopping, audio source selection, and platform/OBS/PipeWire flags.
 """
 
 import os
@@ -42,7 +42,7 @@ class ScreenRecorderGUI(tk.Tk):
 
         subtitle_lbl = ttk.Label(
             header_frame,
-            text="Supports Wayland (Spectacle/wlroots/PipeWire), X11, XWayland | MP4 & MKV | ALSA, PulseAudio, JACK"
+            text="Supports Wayland (PipeWire/OBS/wlroots), X11, XWayland | MP4 & MKV | ALSA, PulseAudio, JACK"
         )
         subtitle_lbl.pack(anchor=tk.W)
 
@@ -86,12 +86,12 @@ class ScreenRecorderGUI(tk.Tk):
         platform_combo = ttk.Combobox(
             form_frame,
             textvariable=self.platform_var,
-            values=["auto", "spectacle", "wayland", "pipewire", "x11", "xwayland"],
+            values=["auto", "pipewire", "obs", "wayland", "x11", "xwayland"],
             state="readonly",
             width=20
         )
         platform_combo.grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(form_frame, text="(Use 'spectacle' or 'pipewire' for KDE Plasma)", font=("Helvetica", 9, "italic")).grid(row=row, column=2, sticky=tk.W, pady=5)
+        ttk.Label(form_frame, text="(Use 'pipewire' or 'obs' for KDE Plasma)", font=("Helvetica", 9, "italic")).grid(row=row, column=2, sticky=tk.W, pady=5)
 
         row += 1
 
@@ -271,7 +271,7 @@ class ScreenRecorderGUI(tk.Tk):
             audio_device_id=audio_dev_id,
             framerate=fps,
             geometry=geometry_str,
-            use_spectacle=(platform_str == "spectacle"),
+            use_obs=(platform_str == "obs"),
             use_pipewire_gstreamer=(platform_str == "pipewire")
         )
 
