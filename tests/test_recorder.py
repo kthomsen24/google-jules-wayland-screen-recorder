@@ -12,7 +12,7 @@ from screen_recorder.audio import (
     get_jack_devices, get_audio_devices
 )
 from screen_recorder.engine import (
-    ScreenRecorderEngine, RecorderConfig, DisplayPlatform, ContainerFormat
+    ScreenRecorderEngine, RecorderConfig, DisplayPlatform, ContainerFormat, sanitize_recorder_error
 )
 from screen_recorder.cli import parse_args, main as cli_main
 
@@ -80,6 +80,20 @@ class TestScreenRecorderEngine(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    def test_sanitize_recorder_error(self):
+        raw = """ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers
+built with gcc 13 (Ubuntu 13.2.0-23ubuntu3)
+configuration: --prefix=/usr --enable-gpl
+libavutil      58. 29.100 / 58. 29.100
+libavcodec     60. 31.102 / 60. 31.102
+[x11grab @ 0x55d1] Cannot open display ':0.0', error 1.
+:0.0: Input/output error
+"""
+        clean = sanitize_recorder_error(raw)
+        self.assertNotIn("built with gcc", clean)
+        self.assertNotIn("configuration:", clean)
+        self.assertIn("Cannot open display", clean)
+
     def test_command_building_wf_recorder(self):
         out_path = os.path.join(self.tmp_dir, "out.mp4")
         cfg = RecorderConfig(
@@ -105,7 +119,7 @@ class TestScreenRecorderEngine(unittest.TestCase):
         cfg = RecorderConfig(
             output_file=out_path,
             platform=DisplayPlatform.PIPEWIRE,
-            audio_backend=AudioBackend.PULSEAUDIO,
+            use_pipewire_gstreamer=True,
             framerate=30
         )
         engine = ScreenRecorderEngine(cfg)
@@ -114,7 +128,6 @@ class TestScreenRecorderEngine(unittest.TestCase):
             cmd = engine.build_command()
             self.assertEqual(cmd[0], "gst-launch-1.0")
             self.assertIn("pipewiresrc", cmd)
-            self.assertIn("pulsesrc", cmd)
 
     def test_command_building_ffmpeg_x11(self):
         out_path = os.path.join(self.tmp_dir, "out.mkv")
@@ -140,12 +153,10 @@ class TestScreenRecorderEngine(unittest.TestCase):
 
     @patch("subprocess.Popen")
     def test_screencopy_unsupported_fallback_to_pipewire(self, mock_popen):
-        # First call (wf-recorder) fails with screencopy error
         fail_proc = MagicMock()
         fail_proc.poll.return_value = 1
         fail_proc.communicate.return_value = ("", "Recorder failed to start: compositor doesn't support wlr-screencopy-unstable-v1")
 
-        # Second call (GStreamer PipeWire fallback) succeeds
         success_proc = MagicMock()
         success_proc.poll.return_value = None
 
