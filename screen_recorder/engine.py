@@ -1,6 +1,6 @@
 """
 Screen Recorder Engine for Wayland, X11, and XWayland with ALSA/PulseAudio/JACK support.
-Supports Spectacle DBus / Spectacle CLI, PipeWire, wf-recorder, and FFmpeg capture options.
+Supports PipeWire, wf-recorder, and FFmpeg capture options.
 """
 
 from enum import Enum
@@ -21,7 +21,6 @@ class DisplayPlatform(str, Enum):
     X11 = "x11"
     XWAYLAND = "xwayland"
     PIPEWIRE = "pipewire"
-    SPECTACLE = "spectacle"
 
 
 class ContainerFormat(str, Enum):
@@ -81,7 +80,6 @@ class RecorderConfig:
         codec: Optional[str] = None,
         force_ffmpeg: bool = False,
         use_pipewire_gstreamer: bool = False,
-        use_spectacle: bool = False,
     ):
         self.output_file = output_file
         self.format = format
@@ -93,7 +91,6 @@ class RecorderConfig:
         self.codec = codec
         self.force_ffmpeg = force_ffmpeg
         self.use_pipewire_gstreamer = use_pipewire_gstreamer
-        self.use_spectacle = use_spectacle
 
     def validate(self) -> Tuple[bool, Optional[str]]:
         if not self.output_file:
@@ -132,12 +129,16 @@ class ScreenRecorderEngine:
         xdg_session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
         desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
 
-        if "kde" in desktop and (wayland_display or xdg_session_type == "wayland"):
-            if shutil.which("spectacle"):
-                return DisplayPlatform.SPECTACLE
+        if ("kde" in desktop or "gnome" in desktop) and (wayland_display or xdg_session_type == "wayland"):
+            if shutil.which("gst-launch-1.0"):
+                return DisplayPlatform.PIPEWIRE
+            elif shutil.which("wf-recorder"):
+                return DisplayPlatform.WAYLAND
             return DisplayPlatform.PIPEWIRE
         elif wayland_display or xdg_session_type == "wayland":
-            return DisplayPlatform.WAYLAND
+            if shutil.which("wf-recorder"):
+                return DisplayPlatform.WAYLAND
+            return DisplayPlatform.PIPEWIRE
         elif os.environ.get("DISPLAY"):
             return DisplayPlatform.X11
         else:
@@ -149,43 +150,21 @@ class ScreenRecorderEngine:
         platform = self.detect_platform()
         cmd: List[str] = []
 
-        use_spectacle = (
-            (platform == DisplayPlatform.SPECTACLE or self.config.use_spectacle)
-            and (shutil.which("qdbus") is not None or shutil.which("dbus-send") is not None or shutil.which("spectacle") is not None)
-        ) and not force_fallback
-
         use_wf_recorder = (
             (platform == DisplayPlatform.WAYLAND)
             and (shutil.which("wf-recorder") is not None)
             and not self.config.force_ffmpeg
             and not self.config.use_pipewire_gstreamer
-            and not use_spectacle
             and not force_fallback
         )
 
         use_gstreamer_pipewire = (
-            (platform == DisplayPlatform.PIPEWIRE or self.config.use_pipewire_gstreamer)
+            (platform == DisplayPlatform.PIPEWIRE or self.config.use_pipewire_gstreamer or force_fallback)
             and shutil.which("gst-launch-1.0") is not None
             and not use_wf_recorder
-            and not use_spectacle
         )
 
-        if use_spectacle:
-            if shutil.which("qdbus"):
-                cmd.extend([
-                    "qdbus", "org.kde.Spectacle", "/",
-                    "org.kde.Spectacle.RecordScreen", "1"
-                ])
-            elif shutil.which("dbus-send"):
-                cmd.extend([
-                    "dbus-send", "--session", "--type=method_call",
-                    "--dest=org.kde.Spectacle", "/",
-                    "org.kde.Spectacle.RecordScreen", "int32:1"
-                ])
-            elif shutil.which("spectacle"):
-                cmd.extend(["spectacle", "--record", "screen"])
-
-        elif use_wf_recorder:
+        if use_wf_recorder:
             cmd.append("wf-recorder")
             cmd.extend(["-f", self.config.output_file])
             cmd.extend(["-r", str(self.config.framerate)])
@@ -206,6 +185,7 @@ class ScreenRecorderEngine:
             cmd.append("gst-launch-1.0")
             cmd.extend(["-e"])
 
+            # Video pipeline branch
             cmd.extend(["pipewiresrc", "do-timestamp=true", "!"])
             cmd.extend(["videoconvert", "!"])
             cmd.extend(["videorate", "!"])
@@ -219,6 +199,25 @@ class ScreenRecorderEngine:
                 cmd.extend(["x264enc", "speed-preset=ultrafast", "tune=zerolatency", "!"])
                 cmd.extend(["mp4mux", "name=mux", "!"])
                 cmd.extend(["filesink", f"location={self.config.output_file}"])
+
+            # Audio pipeline branch if enabled
+            if self.config.audio_backend == AudioBackend.PULSEAUDIO:
+                device = self.config.audio_device_id or "default"
+                cmd.extend(["pulsesrc", f"device={device}", "!"])
+                cmd.extend(["audioconvert", "!"])
+                cmd.extend(["lamemp3enc", "!"])
+                cmd.extend(["mux."])
+            elif self.config.audio_backend == AudioBackend.ALSA:
+                device = self.config.audio_device_id or "default"
+                cmd.extend(["alsasrc", f"device={device}", "!"])
+                cmd.extend(["audioconvert", "!"])
+                cmd.extend(["lamemp3enc", "!"])
+                cmd.extend(["mux."])
+            elif self.config.audio_backend == AudioBackend.JACK:
+                cmd.extend(["jackaudiosrc", "!"])
+                cmd.extend(["audioconvert", "!"])
+                cmd.extend(["lamemp3enc", "!"])
+                cmd.extend(["mux."])
 
         else:
             # Standard FFmpeg path
@@ -281,7 +280,7 @@ class ScreenRecorderEngine:
     def _spawn_process(self, cmd: List[str]) -> Tuple[bool, Optional[str]]:
         env = os.environ.copy()
         platform = self.detect_platform()
-        if platform in (DisplayPlatform.WAYLAND, DisplayPlatform.SPECTACLE):
+        if platform == DisplayPlatform.WAYLAND:
             env["GDK_BACKEND"] = "wayland,x11"
             env["QT_QPA_PLATFORM"] = "wayland;xcb"
         elif platform in (DisplayPlatform.X11, DisplayPlatform.XWAYLAND):
@@ -303,11 +302,7 @@ class ScreenRecorderEngine:
             time.sleep(0.3)
             ret = self.process.poll()
 
-            # If the process completed with return code 0 (e.g., qdbus or dbus-send method call)
-            if ret is not None and ret == 0:
-                return True, None
-
-            # If the process exited with non-zero exit code, it failed
+            # Process exited immediately with error
             if ret is not None and ret != 0:
                 _, stderr = self.process.communicate()
                 clean_err = sanitize_recorder_error(stderr)
@@ -333,28 +328,19 @@ class ScreenRecorderEngine:
         success, err_msg = self._spawn_process(cmd)
 
         if not success:
-            is_screencopy_error = err_msg and ("wlr-screencopy-unstable-v1" in err_msg or "screencopy" in err_msg)
-
-            if cmd[0] == "wf-recorder" and (is_screencopy_error or "failed" in err_msg.lower()):
-                if shutil.which("spectacle") or shutil.which("qdbus"):
-                    self.config.use_spectacle = True
-                    spectacle_cmd = self.build_command()
-                    sp_success, sp_err = self._spawn_process(spectacle_cmd)
-                    if sp_success:
-                        return True, None
-
-                if shutil.which("gst-launch-1.0"):
-                    self.config.use_pipewire_gstreamer = True
-                    pipewire_cmd = self.build_command()
-                    pw_success, pw_err = self._spawn_process(pipewire_cmd)
-                    if pw_success:
-                        return True, None
-
-                self.config.force_ffmpeg = True
-                ffmpeg_cmd = self.build_command()
-                ffmpeg_success, ffmpeg_err = self._spawn_process(ffmpeg_cmd)
-                if ffmpeg_success:
+            if shutil.which("gst-launch-1.0"):
+                self.config.use_pipewire_gstreamer = True
+                pipewire_cmd = self.build_command()
+                pw_success, pw_err = self._spawn_process(pipewire_cmd)
+                if pw_success:
                     return True, None
+
+            self.config.force_ffmpeg = True
+            self.config.use_pipewire_gstreamer = False
+            ffmpeg_cmd = self.build_command()
+            ffmpeg_success, ffmpeg_err = self._spawn_process(ffmpeg_cmd)
+            if ffmpeg_success:
+                return True, None
 
             return False, f"Recorder failed to start: {err_msg}"
 
@@ -366,12 +352,7 @@ class ScreenRecorderEngine:
 
         try:
             self.stop_time = time.time()
-            if self._active_backend_cmd in ("qdbus", "dbus-send", "spectacle"):
-                if shutil.which("qdbus"):
-                    subprocess.run(["qdbus", "org.kde.Spectacle", "/", "org.kde.Spectacle.RecordScreen", "0"], capture_output=True)
-                if self.process and self.process.poll() is None:
-                    self.process.terminate()
-            elif self.process is not None:
+            if self.process is not None:
                 if self.process.poll() is None:
                     self.process.send_signal(signal.SIGINT)
 
