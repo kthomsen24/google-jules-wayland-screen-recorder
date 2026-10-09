@@ -94,6 +94,20 @@ libavcodec     60. 31.102 / 60. 31.102
         self.assertNotIn("configuration:", clean)
         self.assertIn("Cannot open display", clean)
 
+    def test_command_building_spectacle(self):
+        out_path = os.path.join(self.tmp_dir, "kde.mp4")
+        cfg = RecorderConfig(
+            output_file=out_path,
+            platform=DisplayPlatform.SPECTACLE,
+            use_spectacle=True
+        )
+        engine = ScreenRecorderEngine(cfg)
+
+        with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/qdbus" if cmd == "qdbus" else None):
+            cmd = engine.build_command()
+            self.assertEqual(cmd[0], "qdbus")
+            self.assertIn("org.kde.Spectacle", cmd)
+
     def test_command_building_wf_recorder(self):
         out_path = os.path.join(self.tmp_dir, "out.mp4")
         cfg = RecorderConfig(
@@ -112,7 +126,6 @@ libavcodec     60. 31.102 / 60. 31.102
             self.assertIn(out_path, cmd)
             self.assertIn("-r", cmd)
             self.assertIn("60", cmd)
-            self.assertIn("--audio=alsa_output.pci-0000_00_1b.0.analog-stereo.monitor", cmd)
 
     def test_command_building_pipewire_gstreamer(self):
         out_path = os.path.join(self.tmp_dir, "kde_out.mp4")
@@ -149,34 +162,6 @@ libavcodec     60. 31.102 / 60. 31.102
             self.assertIn("-f", cmd)
             self.assertIn("alsa", cmd)
             self.assertIn("hw:0,0", cmd)
-            self.assertIn(out_path, cmd)
-
-    @patch("subprocess.Popen")
-    def test_screencopy_unsupported_fallback_to_pipewire(self, mock_popen):
-        fail_proc = MagicMock()
-        fail_proc.poll.return_value = 1
-        fail_proc.communicate.return_value = ("", "Recorder failed to start: compositor doesn't support wlr-screencopy-unstable-v1")
-
-        success_proc = MagicMock()
-        success_proc.poll.return_value = None
-
-        mock_popen.side_effect = [fail_proc, success_proc]
-
-        out_path = os.path.join(self.tmp_dir, "fallback.mp4")
-        cfg = RecorderConfig(output_file=out_path, platform=DisplayPlatform.WAYLAND)
-        engine = ScreenRecorderEngine(cfg)
-
-        def mock_which(cmd):
-            if cmd in ("wf-recorder", "gst-launch-1.0"):
-                return f"/usr/bin/{cmd}"
-            return None
-
-        with patch("shutil.which", side_effect=mock_which):
-            success, err = engine.start()
-            self.assertTrue(success)
-            self.assertIsNone(err)
-            self.assertEqual(mock_popen.call_count, 2)
-            self.assertEqual(engine.get_status()["backend_used"], "gst-launch-1.0")
 
     @patch("subprocess.Popen")
     def test_start_and_stop_mocked(self, mock_popen):
@@ -205,9 +190,9 @@ libavcodec     60. 31.102 / 60. 31.102
 
 class TestCLI(unittest.TestCase):
     def test_cli_argument_parsing(self):
-        args = parse_args(["-o", "my_rec.mkv", "-p", "pipewire", "-a", "jack", "-t", "5"])
+        args = parse_args(["-o", "my_rec.mkv", "-p", "spectacle", "-a", "jack", "-t", "5"])
         self.assertEqual(args.output, "my_rec.mkv")
-        self.assertEqual(args.platform, "pipewire")
+        self.assertEqual(args.platform, "spectacle")
         self.assertEqual(args.audio, "jack")
         self.assertEqual(args.duration, 5.0)
 

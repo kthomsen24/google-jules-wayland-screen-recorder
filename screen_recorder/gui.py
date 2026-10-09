@@ -1,6 +1,6 @@
 """
 GUI Interface for Screen Recorder Utility using Tkinter.
-Runs in its own window with manual controls for recording, stopping, audio source selection, and platform/PipeWire flags.
+Runs in its own window with manual controls for recording, stopping, audio source selection, and platform/Spectacle/PipeWire flags.
 """
 
 import os
@@ -18,8 +18,8 @@ class ScreenRecorderGUI(tk.Tk):
     def __init__(self, engine: Optional[ScreenRecorderEngine] = None):
         super().__init__()
         self.title("Wayland / Multi-Platform Screen Recorder")
-        self.geometry("650x550")
-        self.minsize(580, 500)
+        self.geometry("660x560")
+        self.minsize(590, 510)
 
         self.engine = engine or ScreenRecorderEngine()
         self._update_timer = None
@@ -42,7 +42,7 @@ class ScreenRecorderGUI(tk.Tk):
 
         subtitle_lbl = ttk.Label(
             header_frame,
-            text="Supports Wayland (wlroots/PipeWire), X11, XWayland | MP4 & MKV | ALSA, PulseAudio, JACK"
+            text="Supports Wayland (Spectacle/wlroots/PipeWire), X11, XWayland | MP4 & MKV | ALSA, PulseAudio, JACK"
         )
         subtitle_lbl.pack(anchor=tk.W)
 
@@ -86,12 +86,12 @@ class ScreenRecorderGUI(tk.Tk):
         platform_combo = ttk.Combobox(
             form_frame,
             textvariable=self.platform_var,
-            values=["auto", "wayland", "pipewire", "x11", "xwayland"],
+            values=["auto", "spectacle", "wayland", "pipewire", "x11", "xwayland"],
             state="readonly",
             width=20
         )
         platform_combo.grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(form_frame, text="(Use 'pipewire' for KDE Plasma / GNOME)", font=("Helvetica", 9, "italic")).grid(row=row, column=2, sticky=tk.W, pady=5)
+        ttk.Label(form_frame, text="(Use 'spectacle' or 'pipewire' for KDE Plasma)", font=("Helvetica", 9, "italic")).grid(row=row, column=2, sticky=tk.W, pady=5)
 
         row += 1
 
@@ -271,6 +271,7 @@ class ScreenRecorderGUI(tk.Tk):
             audio_device_id=audio_dev_id,
             framerate=fps,
             geometry=geometry_str,
+            use_spectacle=(platform_str == "spectacle"),
             use_pipewire_gstreamer=(platform_str == "pipewire")
         )
 

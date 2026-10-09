@@ -1,6 +1,6 @@
 """
 Screen Recorder Engine for Wayland, X11, and XWayland with ALSA/PulseAudio/JACK support.
-Provides robust fallback logic and error sanitization for FFmpeg, wf-recorder, and PipeWire/GStreamer.
+Supports Spectacle DBus / Spectacle CLI, PipeWire, wf-recorder, and FFmpeg capture options.
 """
 
 from enum import Enum
@@ -21,6 +21,7 @@ class DisplayPlatform(str, Enum):
     X11 = "x11"
     XWAYLAND = "xwayland"
     PIPEWIRE = "pipewire"
+    SPECTACLE = "spectacle"
 
 
 class ContainerFormat(str, Enum):
@@ -62,7 +63,6 @@ def sanitize_recorder_error(raw_stderr: str) -> str:
         filtered_lines.append(line_str)
 
     if filtered_lines:
-        # Return last few meaningful error lines
         return "\n".join(filtered_lines[-5:])
 
     return lines[-1] if lines else raw_stderr.strip()
@@ -81,6 +81,7 @@ class RecorderConfig:
         codec: Optional[str] = None,
         force_ffmpeg: bool = False,
         use_pipewire_gstreamer: bool = False,
+        use_spectacle: bool = False,
     ):
         self.output_file = output_file
         self.format = format
@@ -92,6 +93,7 @@ class RecorderConfig:
         self.codec = codec
         self.force_ffmpeg = force_ffmpeg
         self.use_pipewire_gstreamer = use_pipewire_gstreamer
+        self.use_spectacle = use_spectacle
 
     def validate(self) -> Tuple[bool, Optional[str]]:
         if not self.output_file:
@@ -128,8 +130,13 @@ class ScreenRecorderEngine:
 
         wayland_display = os.environ.get("WAYLAND_DISPLAY")
         xdg_session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
 
-        if wayland_display or xdg_session_type == "wayland":
+        if "kde" in desktop and (wayland_display or xdg_session_type == "wayland"):
+            if shutil.which("spectacle"):
+                return DisplayPlatform.SPECTACLE
+            return DisplayPlatform.PIPEWIRE
+        elif wayland_display or xdg_session_type == "wayland":
             return DisplayPlatform.WAYLAND
         elif os.environ.get("DISPLAY"):
             return DisplayPlatform.X11
@@ -142,20 +149,43 @@ class ScreenRecorderEngine:
         platform = self.detect_platform()
         cmd: List[str] = []
 
+        use_spectacle = (
+            (platform == DisplayPlatform.SPECTACLE or self.config.use_spectacle)
+            and (shutil.which("qdbus") is not None or shutil.which("dbus-send") is not None or shutil.which("spectacle") is not None)
+        ) and not force_fallback
+
         use_wf_recorder = (
             (platform == DisplayPlatform.WAYLAND)
             and (shutil.which("wf-recorder") is not None)
             and not self.config.force_ffmpeg
             and not self.config.use_pipewire_gstreamer
+            and not use_spectacle
             and not force_fallback
         )
 
         use_gstreamer_pipewire = (
             (platform == DisplayPlatform.PIPEWIRE or self.config.use_pipewire_gstreamer)
             and shutil.which("gst-launch-1.0") is not None
+            and not use_wf_recorder
+            and not use_spectacle
         )
 
-        if use_wf_recorder:
+        if use_spectacle:
+            if shutil.which("qdbus"):
+                cmd.extend([
+                    "qdbus", "org.kde.Spectacle", "/",
+                    "org.kde.Spectacle.RecordScreen", "1"
+                ])
+            elif shutil.which("dbus-send"):
+                cmd.extend([
+                    "dbus-send", "--session", "--type=method_call",
+                    "--dest=org.kde.Spectacle", "/",
+                    "org.kde.Spectacle.RecordScreen", "int32:1"
+                ])
+            elif shutil.which("spectacle"):
+                cmd.extend(["spectacle", "--record", "screen"])
+
+        elif use_wf_recorder:
             cmd.append("wf-recorder")
             cmd.extend(["-f", self.config.output_file])
             cmd.extend(["-r", str(self.config.framerate)])
@@ -173,11 +203,9 @@ class ScreenRecorderEngine:
                     cmd.append("-a")
 
         elif use_gstreamer_pipewire:
-            # GStreamer PipeWire pipeline
             cmd.append("gst-launch-1.0")
             cmd.extend(["-e"])
 
-            # Video branch
             cmd.extend(["pipewiresrc", "do-timestamp=true", "!"])
             cmd.extend(["videoconvert", "!"])
             cmd.extend(["videorate", "!"])
@@ -228,7 +256,6 @@ class ScreenRecorderEngine:
                 else:
                     cmd.extend(["-f", "x11grab", "-r", str(self.config.framerate), "-i", ":0.0"])
 
-            # Audio input selection
             if self.config.audio_backend == AudioBackend.ALSA:
                 device = self.config.audio_device_id or "default"
                 cmd.extend(["-f", "alsa", "-i", device])
@@ -239,7 +266,6 @@ class ScreenRecorderEngine:
                 device = self.config.audio_device_id or "default"
                 cmd.extend(["-f", "jack", "-i", device])
 
-            # Codec settings
             if self.config.codec:
                 cmd.extend(["-c:v", self.config.codec])
             else:
@@ -255,7 +281,7 @@ class ScreenRecorderEngine:
     def _spawn_process(self, cmd: List[str]) -> Tuple[bool, Optional[str]]:
         env = os.environ.copy()
         platform = self.detect_platform()
-        if platform == DisplayPlatform.WAYLAND:
+        if platform in (DisplayPlatform.WAYLAND, DisplayPlatform.SPECTACLE):
             env["GDK_BACKEND"] = "wayland,x11"
             env["QT_QPA_PLATFORM"] = "wayland;xcb"
         elif platform in (DisplayPlatform.X11, DisplayPlatform.XWAYLAND):
@@ -275,7 +301,14 @@ class ScreenRecorderEngine:
             self._active_backend_cmd = cmd[0]
 
             time.sleep(0.3)
-            if self.process.poll() is not None:
+            ret = self.process.poll()
+
+            # If the process completed with return code 0 (e.g., qdbus or dbus-send method call)
+            if ret is not None and ret == 0:
+                return True, None
+
+            # If the process exited with non-zero exit code, it failed
+            if ret is not None and ret != 0:
                 _, stderr = self.process.communicate()
                 clean_err = sanitize_recorder_error(stderr)
                 self._last_error = clean_err
@@ -303,7 +336,13 @@ class ScreenRecorderEngine:
             is_screencopy_error = err_msg and ("wlr-screencopy-unstable-v1" in err_msg or "screencopy" in err_msg)
 
             if cmd[0] == "wf-recorder" and (is_screencopy_error or "failed" in err_msg.lower()):
-                # Fallback attempt 1: PipeWire if GStreamer is available
+                if shutil.which("spectacle") or shutil.which("qdbus"):
+                    self.config.use_spectacle = True
+                    spectacle_cmd = self.build_command()
+                    sp_success, sp_err = self._spawn_process(spectacle_cmd)
+                    if sp_success:
+                        return True, None
+
                 if shutil.which("gst-launch-1.0"):
                     self.config.use_pipewire_gstreamer = True
                     pipewire_cmd = self.build_command()
@@ -311,36 +350,36 @@ class ScreenRecorderEngine:
                     if pw_success:
                         return True, None
 
-                # Fallback attempt 2: FFmpeg x11grab
                 self.config.force_ffmpeg = True
-                self.config.use_pipewire_gstreamer = False
                 ffmpeg_cmd = self.build_command()
                 ffmpeg_success, ffmpeg_err = self._spawn_process(ffmpeg_cmd)
                 if ffmpeg_success:
                     return True, None
-                else:
-                    return False, (
-                        f"wf-recorder failed ({err_msg}). "
-                        f"Fallback options also failed: {ffmpeg_err}"
-                    )
 
             return False, f"Recorder failed to start: {err_msg}"
 
         return True, None
 
     def stop(self) -> Tuple[bool, Optional[str]]:
-        if not self.is_recording or self.process is None:
+        if self.process is None and not self.is_recording:
             return False, "No active recording to stop."
 
         try:
             self.stop_time = time.time()
-            self.process.send_signal(signal.SIGINT)
+            if self._active_backend_cmd in ("qdbus", "dbus-send", "spectacle"):
+                if shutil.which("qdbus"):
+                    subprocess.run(["qdbus", "org.kde.Spectacle", "/", "org.kde.Spectacle.RecordScreen", "0"], capture_output=True)
+                if self.process and self.process.poll() is None:
+                    self.process.terminate()
+            elif self.process is not None:
+                if self.process.poll() is None:
+                    self.process.send_signal(signal.SIGINT)
 
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.terminate()
-                self.process.wait(timeout=3)
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()
+                    self.process.wait(timeout=3)
 
             self.process = None
             return True, None
