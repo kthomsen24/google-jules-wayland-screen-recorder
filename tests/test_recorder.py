@@ -100,6 +100,22 @@ class TestScreenRecorderEngine(unittest.TestCase):
             self.assertIn("60", cmd)
             self.assertIn("--audio=alsa_output.pci-0000_00_1b.0.analog-stereo.monitor", cmd)
 
+    def test_command_building_pipewire_gstreamer(self):
+        out_path = os.path.join(self.tmp_dir, "kde_out.mp4")
+        cfg = RecorderConfig(
+            output_file=out_path,
+            platform=DisplayPlatform.PIPEWIRE,
+            audio_backend=AudioBackend.PULSEAUDIO,
+            framerate=30
+        )
+        engine = ScreenRecorderEngine(cfg)
+
+        with patch("shutil.which", side_effect=lambda cmd: "/usr/bin/gst-launch-1.0" if cmd == "gst-launch-1.0" else None):
+            cmd = engine.build_command()
+            self.assertEqual(cmd[0], "gst-launch-1.0")
+            self.assertIn("pipewiresrc", cmd)
+            self.assertIn("pulsesrc", cmd)
+
     def test_command_building_ffmpeg_x11(self):
         out_path = os.path.join(self.tmp_dir, "out.mkv")
         cfg = RecorderConfig(
@@ -123,13 +139,13 @@ class TestScreenRecorderEngine(unittest.TestCase):
             self.assertIn(out_path, cmd)
 
     @patch("subprocess.Popen")
-    def test_screencopy_unsupported_fallback_to_ffmpeg(self, mock_popen):
+    def test_screencopy_unsupported_fallback_to_pipewire(self, mock_popen):
         # First call (wf-recorder) fails with screencopy error
         fail_proc = MagicMock()
         fail_proc.poll.return_value = 1
         fail_proc.communicate.return_value = ("", "Recorder failed to start: compositor doesn't support wlr-screencopy-unstable-v1")
 
-        # Second call (ffmpeg fallback) succeeds
+        # Second call (GStreamer PipeWire fallback) succeeds
         success_proc = MagicMock()
         success_proc.poll.return_value = None
 
@@ -139,12 +155,17 @@ class TestScreenRecorderEngine(unittest.TestCase):
         cfg = RecorderConfig(output_file=out_path, platform=DisplayPlatform.WAYLAND)
         engine = ScreenRecorderEngine(cfg)
 
-        with patch("shutil.which", return_value="/usr/bin/wf-recorder"):
+        def mock_which(cmd):
+            if cmd in ("wf-recorder", "gst-launch-1.0"):
+                return f"/usr/bin/{cmd}"
+            return None
+
+        with patch("shutil.which", side_effect=mock_which):
             success, err = engine.start()
             self.assertTrue(success)
             self.assertIsNone(err)
             self.assertEqual(mock_popen.call_count, 2)
-            self.assertEqual(engine.get_status()["backend_used"], "ffmpeg")
+            self.assertEqual(engine.get_status()["backend_used"], "gst-launch-1.0")
 
     @patch("subprocess.Popen")
     def test_start_and_stop_mocked(self, mock_popen):
@@ -173,9 +194,9 @@ class TestScreenRecorderEngine(unittest.TestCase):
 
 class TestCLI(unittest.TestCase):
     def test_cli_argument_parsing(self):
-        args = parse_args(["-o", "my_rec.mkv", "-p", "wayland", "-a", "jack", "-t", "5"])
+        args = parse_args(["-o", "my_rec.mkv", "-p", "pipewire", "-a", "jack", "-t", "5"])
         self.assertEqual(args.output, "my_rec.mkv")
-        self.assertEqual(args.platform, "wayland")
+        self.assertEqual(args.platform, "pipewire")
         self.assertEqual(args.audio, "jack")
         self.assertEqual(args.duration, 5.0)
 

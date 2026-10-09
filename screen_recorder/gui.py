@@ -1,6 +1,6 @@
 """
 GUI Interface for Screen Recorder Utility using Tkinter.
-Runs in its own window with manual controls for recording, stopping, audio source selection, and platform flags.
+Runs in its own window with manual controls for recording, stopping, audio source selection, and platform/PipeWire flags.
 """
 
 import os
@@ -18,8 +18,8 @@ class ScreenRecorderGUI(tk.Tk):
     def __init__(self, engine: Optional[ScreenRecorderEngine] = None):
         super().__init__()
         self.title("Wayland / Multi-Platform Screen Recorder")
-        self.geometry("620x520")
-        self.minsize(550, 480)
+        self.geometry("650x550")
+        self.minsize(580, 500)
 
         self.engine = engine or ScreenRecorderEngine()
         self._update_timer = None
@@ -42,7 +42,7 @@ class ScreenRecorderGUI(tk.Tk):
 
         subtitle_lbl = ttk.Label(
             header_frame,
-            text="Supports Wayland, X11, XWayland | MP4 & MKV | ALSA, PulseAudio, JACK"
+            text="Supports Wayland (wlroots/PipeWire), X11, XWayland | MP4 & MKV | ALSA, PulseAudio, JACK"
         )
         subtitle_lbl.pack(anchor=tk.W)
 
@@ -80,17 +80,18 @@ class ScreenRecorderGUI(tk.Tk):
 
         row += 1
 
-        # Display Platform Failsafe Flag Selection
-        ttk.Label(form_frame, text="Display Platform:", font=("Helvetica", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=5)
+        # Display Platform / Capture Method Selection
+        ttk.Label(form_frame, text="Capture Method:", font=("Helvetica", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=5)
         self.platform_var = tk.StringVar(value="auto")
         platform_combo = ttk.Combobox(
             form_frame,
             textvariable=self.platform_var,
-            values=["auto", "wayland", "x11", "xwayland"],
+            values=["auto", "wayland", "pipewire", "x11", "xwayland"],
             state="readonly",
-            width=15
+            width=20
         )
         platform_combo.grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(form_frame, text="(Use 'pipewire' for KDE Plasma / GNOME)", font=("Helvetica", 9, "italic")).grid(row=row, column=2, sticky=tk.W, pady=5)
 
         row += 1
 
@@ -173,7 +174,7 @@ class ScreenRecorderGUI(tk.Tk):
         self.log_text = tk.Text(log_frame, height=5, state=tk.DISABLED, wrap=tk.WORD, font=("Monospace", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        self.log("Screen Recorder GUI initialized. Platform failsafe options ready.")
+        self.log("Screen Recorder GUI initialized.")
 
     def log(self, message: str):
         self.log_text.config(state=tk.NORMAL)
@@ -269,7 +270,8 @@ class ScreenRecorderGUI(tk.Tk):
             audio_backend=audio_backend,
             audio_device_id=audio_dev_id,
             framerate=fps,
-            geometry=geometry_str
+            geometry=geometry_str,
+            use_pipewire_gstreamer=(platform_str == "pipewire")
         )
 
         self.engine.config = config
@@ -280,9 +282,10 @@ class ScreenRecorderGUI(tk.Tk):
             self.log(f"Error: {err}")
             return
 
+        status = self.engine.get_status()
         self.record_btn.config(text="⏹ Stop Recording")
         self.status_label.config(text="Status: Recording ⏺", foreground="red")
-        self.log(f"Recording started -> File: {output_file} | Platform: {self.engine.detect_platform().value}")
+        self.log(f"Recording started -> File: {output_file} | Backend: {status['backend_used']}")
 
         self.start_update_timer()
 
