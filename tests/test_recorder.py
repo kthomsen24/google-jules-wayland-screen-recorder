@@ -4,6 +4,7 @@ import sys
 import shutil
 import tempfile
 import time
+import configparser
 from unittest.mock import patch, MagicMock
 
 from screen_recorder.audio import (
@@ -95,11 +96,12 @@ libavcodec     60. 31.102 / 60. 31.102
         self.assertIn("Cannot open display", clean)
 
     def test_command_building_obs(self):
-        out_path = os.path.join(self.tmp_dir, "kde.mp4")
+        out_path = os.path.join(self.tmp_dir, "kde_recording.mp4")
         cfg = RecorderConfig(
             output_file=out_path,
             platform=DisplayPlatform.OBS,
-            use_obs=True
+            use_obs=True,
+            format=ContainerFormat.MP4
         )
         engine = ScreenRecorderEngine(cfg)
 
@@ -107,6 +109,15 @@ libavcodec     60. 31.102 / 60. 31.102
             cmd = engine.build_command()
             self.assertEqual(cmd[0], "obs")
             self.assertIn("--startrecording", cmd)
+
+            obs_ini = os.path.expanduser("~/.config/obs-studio/basic/profiles/Untitled/basic.ini")
+            self.assertTrue(os.path.exists(obs_ini))
+
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(obs_ini)
+            self.assertEqual(parser.get("SimpleOutput", "FilePath"), self.tmp_dir)
+            self.assertEqual(parser.get("SimpleOutput", "FilenameFormatting"), "kde_recording")
+            self.assertEqual(parser.get("SimpleOutput", "RecFormat"), "mp4")
 
     def test_command_building_wf_recorder(self):
         out_path = os.path.join(self.tmp_dir, "out.mp4")

@@ -1,8 +1,9 @@
 """
 Screen Recorder Engine for Wayland, X11, and XWayland with ALSA/PulseAudio/JACK support.
-Supports OBS Studio CLI recording, PipeWire portal capture, wf-recorder, and FFmpeg capture backends.
+Supports OBS Studio CLI recording with temporary profile configuration overrides, PipeWire portal capture, wf-recorder, and FFmpeg.
 """
 
+import configparser
 from enum import Enum
 import os
 import re
@@ -117,6 +118,7 @@ class ScreenRecorderEngine:
         self.stop_time: Optional[float] = None
         self._last_error: Optional[str] = None
         self._active_backend_cmd: Optional[str] = None
+        self._obs_ini_backup: Optional[Tuple[str, str]] = None
 
     @property
     def is_recording(self) -> bool:
@@ -151,6 +153,60 @@ class ScreenRecorderEngine:
                 return DisplayPlatform.WAYLAND
             return DisplayPlatform.X11
 
+    def _apply_obs_config_override(self) -> None:
+        """
+        Temporarily configures OBS Studio's output directory and filename template
+        in ~/.config/obs-studio/basic/profiles/Untitled/basic.ini so recording
+        outputs directly to config.output_file.
+        """
+        try:
+            target_file = os.path.abspath(self.config.output_file)
+            target_dir = os.path.dirname(target_file) or os.getcwd()
+            base_filename = os.path.splitext(os.path.basename(target_file))[0]
+
+            obs_profile_dir = os.path.expanduser("~/.config/obs-studio/basic/profiles/Untitled")
+            os.makedirs(obs_profile_dir, exist_ok=True)
+            ini_path = os.path.join(obs_profile_dir, "basic.ini")
+
+            parser = configparser.ConfigParser(interpolation=None)
+            if os.path.exists(ini_path):
+                with open(ini_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if self._obs_ini_backup is None:
+                    self._obs_ini_backup = (ini_path, content)
+                parser.read_string(content)
+
+            if not parser.has_section("SimpleOutput"):
+                parser.add_section("SimpleOutput")
+            if not parser.has_section("AdvOutput"):
+                parser.add_section("AdvOutput")
+
+            parser.set("SimpleOutput", "FilePath", target_dir)
+            parser.set("SimpleOutput", "FilenameFormatting", base_filename)
+            parser.set("SimpleOutput", "RecFormat", self.config.format.value)
+
+            parser.set("AdvOutput", "FilePath", target_dir)
+            parser.set("AdvOutput", "FilenameFormatting", base_filename)
+            parser.set("AdvOutput", "RecFormat", self.config.format.value)
+
+            with open(ini_path, "w", encoding="utf-8") as f:
+                parser.write(f)
+        except Exception:
+            pass
+
+    def _restore_obs_config(self) -> None:
+        """
+        Restores OBS Studio's original basic.ini configuration file if a backup was saved.
+        """
+        if self._obs_ini_backup:
+            try:
+                ini_path, content = self._obs_ini_backup
+                with open(ini_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception:
+                pass
+            self._obs_ini_backup = None
+
     def build_command(self, force_fallback: bool = False) -> List[str]:
         platform = self.detect_platform()
         cmd: List[str] = []
@@ -178,7 +234,7 @@ class ScreenRecorderEngine:
         )
 
         if use_obs:
-            # OBS Studio CLI recording mode
+            self._apply_obs_config_override()
             cmd.append("obs")
             cmd.extend(["--startrecording", "--minimize-to-tray"])
 
@@ -203,7 +259,6 @@ class ScreenRecorderEngine:
             cmd.append("gst-launch-1.0")
             cmd.extend(["-e"])
 
-            # Video pipeline branch
             cmd.extend(["pipewiresrc", "do-timestamp=true", "!"])
             cmd.extend(["videoconvert", "!"])
             cmd.extend(["videorate", "!"])
@@ -218,7 +273,6 @@ class ScreenRecorderEngine:
                 cmd.extend(["mp4mux", "name=mux", "!"])
                 cmd.extend(["filesink", f"location={self.config.output_file}"])
 
-            # Audio pipeline branch if enabled
             if self.config.audio_backend == AudioBackend.PULSEAUDIO:
                 device = self.config.audio_device_id or "default"
                 cmd.extend(["pulsesrc", f"device={device}", "!"])
@@ -238,7 +292,6 @@ class ScreenRecorderEngine:
                 cmd.extend(["mux."])
 
         else:
-            # Standard FFmpeg path
             cmd.append("ffmpeg")
             cmd.extend(["-hide_banner", "-loglevel", "error", "-y"])
 
@@ -320,18 +373,19 @@ class ScreenRecorderEngine:
             time.sleep(0.3)
             ret = self.process.poll()
 
-            # Process exited immediately with error
             if ret is not None and ret != 0:
                 _, stderr = self.process.communicate()
                 clean_err = sanitize_recorder_error(stderr)
                 self._last_error = clean_err
                 self.process = None
+                self._restore_obs_config()
                 return False, clean_err
 
             return True, None
         except Exception as e:
             self.process = None
             self._last_error = str(e)
+            self._restore_obs_config()
             return False, str(e)
 
     def start(self) -> Tuple[bool, Optional[str]]:
@@ -383,9 +437,11 @@ class ScreenRecorderEngine:
                     self.process.wait(timeout=3)
 
             self.process = None
+            self._restore_obs_config()
             return True, None
         except Exception as e:
             self.process = None
+            self._restore_obs_config()
             return False, f"Error stopping recorder process: {e}"
 
     def get_status(self) -> Dict[str, Any]:
