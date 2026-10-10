@@ -4,7 +4,6 @@ import sys
 import shutil
 import tempfile
 import time
-import configparser
 from unittest.mock import patch, MagicMock
 
 from screen_recorder.audio import (
@@ -110,14 +109,32 @@ libavcodec     60. 31.102 / 60. 31.102
             self.assertEqual(cmd[0], "obs")
             self.assertIn("--startrecording", cmd)
 
-            obs_ini = os.path.expanduser("~/.config/obs-studio/basic/profiles/Untitled/basic.ini")
-            self.assertTrue(os.path.exists(obs_ini))
+    @patch("screen_recorder.engine.ScreenRecorderEngine._get_obs_recording_dir")
+    def test_obs_relocate_output_file(self, mock_get_obs_dir):
+        obs_dir = tempfile.mkdtemp()
+        mock_get_obs_dir.return_value = obs_dir
 
-            parser = configparser.ConfigParser(interpolation=None)
-            parser.read(obs_ini)
-            self.assertEqual(parser.get("SimpleOutput", "FilePath"), self.tmp_dir)
-            self.assertEqual(parser.get("SimpleOutput", "FilenameFormatting"), "kde_recording")
-            self.assertEqual(parser.get("SimpleOutput", "RecFormat"), "mp4")
+        out_path = os.path.join(self.tmp_dir, "final_obs_video.mp4")
+        cfg = RecorderConfig(
+            output_file=out_path,
+            platform=DisplayPlatform.OBS,
+            use_obs=True
+        )
+        engine = ScreenRecorderEngine(cfg)
+        engine.start_time = time.time() - 2.0
+
+        # Create a dummy video file in OBS's output directory
+        obs_video_file = os.path.join(obs_dir, "2024-01-01_12-00-00.mp4")
+        with open(obs_video_file, "w") as f:
+            f.write("dummy video data")
+
+        engine._relocate_obs_output_file()
+
+        # Check that dummy video file was moved to out_path
+        self.assertTrue(os.path.exists(out_path))
+        self.assertFalse(os.path.exists(obs_video_file))
+
+        shutil.rmtree(obs_dir, ignore_errors=True)
 
     def test_command_building_wf_recorder(self):
         out_path = os.path.join(self.tmp_dir, "out.mp4")
