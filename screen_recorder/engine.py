@@ -1,10 +1,11 @@
 """
 Screen Recorder Engine for Wayland, X11, and XWayland with ALSA/PulseAudio/JACK support.
-Supports OBS Studio CLI recording with temporary profile configuration overrides, PipeWire portal capture, wf-recorder, and FFmpeg.
+Supports OBS Studio CLI recording with post-recording file relocation, PipeWire portal capture, wf-recorder, and FFmpeg.
 """
 
 import configparser
 from enum import Enum
+import glob
 import os
 import re
 import shutil
@@ -118,7 +119,7 @@ class ScreenRecorderEngine:
         self.stop_time: Optional[float] = None
         self._last_error: Optional[str] = None
         self._active_backend_cmd: Optional[str] = None
-        self._obs_ini_backup: Optional[Tuple[str, str]] = None
+        self._obs_pre_recording_files: List[str] = []
 
     @property
     def is_recording(self) -> bool:
@@ -153,59 +154,67 @@ class ScreenRecorderEngine:
                 return DisplayPlatform.WAYLAND
             return DisplayPlatform.X11
 
-    def _apply_obs_config_override(self) -> None:
+    def _get_obs_recording_dir(self) -> str:
         """
-        Temporarily configures OBS Studio's output directory and filename template
-        in ~/.config/obs-studio/basic/profiles/Untitled/basic.ini so recording
-        outputs directly to config.output_file.
+        Reads OBS Studio's configured recording output directory from
+        ~/.config/obs-studio/basic/profiles/Untitled/basic.ini or defaults to ~/Videos.
         """
-        try:
-            target_file = os.path.abspath(self.config.output_file)
-            target_dir = os.path.dirname(target_file) or os.getcwd()
-            base_filename = os.path.splitext(os.path.basename(target_file))[0]
-
-            obs_profile_dir = os.path.expanduser("~/.config/obs-studio/basic/profiles/Untitled")
-            os.makedirs(obs_profile_dir, exist_ok=True)
-            ini_path = os.path.join(obs_profile_dir, "basic.ini")
-
-            parser = configparser.ConfigParser(interpolation=None)
-            if os.path.exists(ini_path):
-                with open(ini_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                if self._obs_ini_backup is None:
-                    self._obs_ini_backup = (ini_path, content)
-                parser.read_string(content)
-
-            if not parser.has_section("SimpleOutput"):
-                parser.add_section("SimpleOutput")
-            if not parser.has_section("AdvOutput"):
-                parser.add_section("AdvOutput")
-
-            parser.set("SimpleOutput", "FilePath", target_dir)
-            parser.set("SimpleOutput", "FilenameFormatting", base_filename)
-            parser.set("SimpleOutput", "RecFormat", self.config.format.value)
-
-            parser.set("AdvOutput", "FilePath", target_dir)
-            parser.set("AdvOutput", "FilenameFormatting", base_filename)
-            parser.set("AdvOutput", "RecFormat", self.config.format.value)
-
-            with open(ini_path, "w", encoding="utf-8") as f:
-                parser.write(f)
-        except Exception:
-            pass
-
-    def _restore_obs_config(self) -> None:
-        """
-        Restores OBS Studio's original basic.ini configuration file if a backup was saved.
-        """
-        if self._obs_ini_backup:
+        ini_path = os.path.expanduser("~/.config/obs-studio/basic/profiles/Untitled/basic.ini")
+        if os.path.exists(ini_path):
             try:
-                ini_path, content = self._obs_ini_backup
-                with open(ini_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                parser = configparser.ConfigParser(interpolation=None)
+                parser.read(ini_path)
+                if parser.has_option("SimpleOutput", "FilePath"):
+                    val = parser.get("SimpleOutput", "FilePath").strip()
+                    if val and os.path.isdir(val):
+                        return val
+                if parser.has_option("AdvOutput", "FilePath"):
+                    val = parser.get("AdvOutput", "FilePath").strip()
+                    if val and os.path.isdir(val):
+                        return val
             except Exception:
                 pass
-            self._obs_ini_backup = None
+
+        videos_dir = os.path.expanduser("~/Videos")
+        if os.path.isdir(videos_dir):
+            return videos_dir
+        return os.path.expanduser("~")
+
+    def _relocate_obs_output_file(self) -> None:
+        """
+        Finds the newly generated video file in OBS's recording directory
+        and moves it to config.output_file.
+        """
+        obs_dir = self._get_obs_recording_dir()
+        if not os.path.isdir(obs_dir):
+            return
+
+        target_file = os.path.abspath(self.config.output_file)
+        target_dir = os.path.dirname(target_file)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+
+        # Look for video files created since start_time in obs_dir
+        candidates = []
+        for ext in ["mp4", "mkv", "webm", "flv", "mov", "ts"]:
+            for filepath in glob.glob(os.path.join(obs_dir, f"*.{ext}")):
+                if filepath not in self._obs_pre_recording_files and os.path.isfile(filepath):
+                    mtime = os.path.getmtime(filepath)
+                    if self.start_time and mtime >= (self.start_time - 5.0):
+                        candidates.append((mtime, filepath))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            latest_obs_file = candidates[0][1]
+
+            try:
+                # If target_file already exists, remove it before moving
+                if os.path.exists(target_file) and target_file != latest_obs_file:
+                    os.remove(target_file)
+
+                shutil.move(latest_obs_file, target_file)
+            except Exception:
+                pass
 
     def build_command(self, force_fallback: bool = False) -> List[str]:
         platform = self.detect_platform()
@@ -234,7 +243,9 @@ class ScreenRecorderEngine:
         )
 
         if use_obs:
-            self._apply_obs_config_override()
+            obs_dir = self._get_obs_recording_dir()
+            self._obs_pre_recording_files = glob.glob(os.path.join(obs_dir, "*"))
+
             cmd.append("obs")
             cmd.extend(["--startrecording", "--minimize-to-tray"])
 
@@ -378,14 +389,12 @@ class ScreenRecorderEngine:
                 clean_err = sanitize_recorder_error(stderr)
                 self._last_error = clean_err
                 self.process = None
-                self._restore_obs_config()
                 return False, clean_err
 
             return True, None
         except Exception as e:
             self.process = None
             self._last_error = str(e)
-            self._restore_obs_config()
             return False, str(e)
 
     def start(self) -> Tuple[bool, Optional[str]]:
@@ -436,12 +445,15 @@ class ScreenRecorderEngine:
                     self.process.terminate()
                     self.process.wait(timeout=3)
 
+            # Move OBS output file if recorded via OBS
+            if self._active_backend_cmd == "obs":
+                time.sleep(0.5)
+                self._relocate_obs_output_file()
+
             self.process = None
-            self._restore_obs_config()
             return True, None
         except Exception as e:
             self.process = None
-            self._restore_obs_config()
             return False, f"Error stopping recorder process: {e}"
 
     def get_status(self) -> Dict[str, Any]:
